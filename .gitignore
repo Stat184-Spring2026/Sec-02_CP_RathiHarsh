@@ -47,3 +47,8 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# Quarto build artifacts
+/.quarto/
+report_files/
+report.tex
