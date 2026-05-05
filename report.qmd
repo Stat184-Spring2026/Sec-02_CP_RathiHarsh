@@ -1,0 +1,649 @@
+---
+title: "Tech Disruption and Generational Pressures: An Exploratory Country-Year Panel Analysis"
+author: "Harsh Rathi"
+date: today
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    fig-pos: "H"
+    geometry: margin=1in
+    keep-tex: false
+bibliography: refs.bib
+csl: apa7.csl
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+# Primary author: Harsh Rathi   Reviewed by: Harsh Rathi
+# Style guide: Tidyverse Style Guide (https://style.tidyverse.org/)
+# Paradigm: Exploratory Data Analysis (EDA) using the {tidyverse}.
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(ggcorrplot)
+library(patchwork)
+library(scales)
+
+# PCIP - Plan: load the pre-cleaned country-year panel produced by the
+# upstream pipeline (R/01_acquire.R -> R/02_clean_join.R -> R/04_*.R).
+# This keeps the report self-contained while letting wrangling live in
+# its own scripts.
+panel <- read_csv("data/merged_with_controls.csv",
+                  show_col_types = FALSE)
+
+# Quick sanity check after import (DA.1)
+stopifnot(nrow(panel) > 0)
+stopifnot(all(c("iso3c", "year", "internet", "youth_unemp",
+                "fertility", "mental_health", "house_price",
+                "gdp_pc", "tertiary_ed", "urban_pct") %in% names(panel)))
+```
+
+# Introduction
+
+A common claim in popular discussion is that the spread of the internet
+and smartphones has reshaped daily life for younger generations: they are
+more anxious, more pessimistic about housing, less likely to have
+children, and harder to employ than the cohorts before them. Most of the
+evidence cited for these claims comes from a single country (often the
+United States) or from short time windows. This project asks a simpler
+question across many countries and many years: as internet penetration
+rises, do we observe shifts in (1) youth unemployment, (2) fertility,
+(3) housing affordability, and (4) mental disorder prevalence?
+
+This report is **exploratory**, not confirmatory. The goal is to
+characterise what the data look like, surface patterns worth taking
+seriously, and propose hypotheses for later confirmatory work. We do not
+pre-register hypotheses or correct for multiple comparisons. We do
+challenge the surface-level patterns by re-running them under simple
+controls and two-way fixed effects to see which patterns survive.
+
+## Paradigm and tooling
+
+We work in the **exploratory** paradigm rather than the confirmatory
+one: we use plots and grouped summaries to describe the data, and we
+treat any regression coefficients in the body of the report as
+descriptive numbers, not as tests of pre-specified hypotheses. We chose
+EDA because internet penetration is observational, not randomised, and
+because the four outcomes are all noisy at the country-year level; an
+honest read of these data starts with description and ends with
+hypotheses, not with claimed effects [@tukey1977eda].
+
+For coding we follow the **{tidyverse}** paradigm. We chose tidyverse
+over base R because nearly all of the work here is data wrangling on a
+country-year panel: joins, pivots, group summaries, faceted plots. These
+are the operations `{dplyr}`, `{tidyr}`, and `{ggplot2}` are designed
+for. We follow the [Tidyverse Style Guide][1] throughout
+[@wickham2023r4ds].
+
+[1]: https://style.tidyverse.org/
+
+# Data
+
+## Sources
+
+The analysis joins five country-year indicators across 24 years (2000
+through 2023). Three of the five come from the World Bank's *World
+Development Indicators* (WDI) [@wbwdi]; one from the OECD Housing
+dashboard [@oecd_hh]; one from the IHME Global Burden of Disease 2023
+release [@ihme_gbd_2023]. Three further controls (GDP per capita,
+tertiary enrollment, and urbanisation) are also pulled from WDI.
+
+```{r tbl-sources}
+#| tbl-cap: "Data sources used in this analysis."
+
+tibble::tribble(
+  ~Source,        ~Indicator,                   ~Variable,        ~Years,
+  "WB WDI",       "IT.NET.USER.ZS",             "internet",       "2000-2023",
+  "WB WDI",       "SL.UEM.1524.ZS",             "youth_unemp",    "2000-2023",
+  "WB WDI",       "SP.DYN.TFRT.IN",             "fertility",      "2000-2023",
+  "WB WDI",       "NY.GDP.PCAP.KD",             "gdp_pc",         "2000-2023",
+  "WB WDI",       "SE.TER.ENRR",                "tertiary_ed",    "2000-2023",
+  "WB WDI",       "SP.URB.TOTL.IN.ZS",          "urban_pct",      "2000-2023",
+  "IHME GBD 23",  "Mental disorders, age-std.", "mental_health",  "2000-2023",
+  "OECD",         "Real House Price Idx (RHP)", "house_price",    "2000-2023"
+) |>
+  kbl(booktabs = TRUE, align = c("l", "l", "l", "l")) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width = FALSE)
+```
+
+## Cases and attributes
+
+A **case** in this analysis is a single country-year, for example
+*United States in 2015* or *Japan in 2008*. Each case carries the
+following case attributes:
+
+- `iso3c` -- ISO-3166 alpha-3 country code (categorical, three letters).
+- `year` -- calendar year (integer, 2000-2023).
+- `continent` and `income_group` -- World Bank classifications (both
+  categorical). Income group is the standard four-level WB classification
+  (Low, Lower-middle, Upper-middle, High income).
+- `internet` -- internet users as a percent of population (numeric, 0-100).
+- `youth_unemp` -- unemployment rate among 15-24 year-olds, percent of
+  that age band's labour force (numeric, 0-100).
+- `fertility` -- total fertility rate, average lifetime births per woman
+  at current age-specific fertility rates (numeric, typically 1-7).
+- `mental_health` -- age-standardised prevalence of any mental disorder
+  in the population, percent (numeric, typically 5-20).
+- `house_price` -- OECD Real House Price Index, with 2015 = 100
+  (numeric, typically 30-300; OECD reports this only for member
+  countries plus a handful of partner economies).
+- `gdp_pc` -- real GDP per capita in constant 2015 USD (numeric).
+- `tertiary_ed` -- gross tertiary enrollment ratio, percent (numeric).
+- `urban_pct` -- urban population as a percent of total (numeric, 0-100).
+
+Not every country-year carries every attribute. The WDI series cover
+nearly all countries; OECD `house_price` is restricted to OECD members
+plus partner economies; IHME GBD covers nearly all countries but lags
+WDI by one or two years in some places.
+
+## FAIR principles
+
+The FAIR principles ask whether data are Findable, Accessible,
+Interoperable, and Reusable [@wilkinson2016fair]. We assess each source
+in turn.
+
+**World Bank WDI.** Strongly FAIR. Each indicator is uniquely identified
+by a stable code (e.g. `IT.NET.USER.ZS`); WDI is openly accessible
+through a documented public API and through the `{WDI}` R package
+[@wdi_pkg]; data are returned in tidy long format with consistent
+country codes, making them interoperable with other panel data; license
+terms permit reuse for research [@wbwdi].
+
+**IHME GBD.** Largely FAIR but with friction on Accessibility. GBD
+estimates are stably identified by cause and measure code, returned in
+documented CSV format, and reusable under the IHME terms-of-use, but
+bulk download requires a free account and the GBD Results Tool web UI
+rather than an open API [@ihme_gbd_2023]. We split the request into two
+chunks (2000-2010, 2011-2023) because the tool caps row counts.
+
+**OECD Housing.** Mostly FAIR. The OECD provides a documented dataflow
+identifier (`HH_DASH`) and SDMX-style metadata. We accessed it through
+the `{OECD}` R package and through manual CSV download; both worked.
+The `iso3c`-style country codes match WB and IHME, supporting
+interoperability after harmonisation through `{countrycode}`
+[@countrycode_pkg].
+
+**Challenges in assessing FAIR.** The honest answer is that "Reusable"
+is the easiest principle to claim and the hardest to verify. Each of
+these providers documents their indicators, but at a level of detail
+that an outside analyst cannot fully audit. We can reuse the data; we
+cannot fully verify upstream collection choices. The same caveat applies
+to "Interoperable": the country codes and years line up, but the
+underlying definitions of constructs like "youth unemployment" rest on
+ILO standards that are themselves periodically revised.
+
+## CARE principles
+
+The CARE principles -- Collective benefit, Authority to control,
+Responsibility, and Ethics -- were developed for Indigenous data
+governance and have been adopted more broadly as a complement to FAIR
+[@care2020]. Applying CARE here is informative even though none of the
+sources are explicitly Indigenous data.
+
+**Collective benefit.** WB and OECD data are explicitly produced for
+public-policy benefit and are free to use. IHME GBD outputs feed into
+WHO and national health-policy work. All three pass this principle in
+the broad sense.
+
+**Authority to control.** This is where the assessment gets thorny for
+mental health prevalence. IHME's GBD model produces estimates for every
+country, including countries whose own data systems do not produce
+comparable estimates. The estimates therefore reflect IHME's modelling
+authority more than the country's own. A country that disagrees with the
+prevalence figure for itself has no easy path to revise it. WB and OECD
+indicators are usually compiled from national statistical offices, which
+sit closer to local authority.
+
+**Responsibility.** All three providers publish documentation of methods
+and uncertainty. IHME publishes 95% uncertainty intervals around its
+GBD estimates; WB flags series breaks; OECD documents the rebasing of
+the housing index. Responsibility is well-handled at the provider level.
+
+**Ethics.** No personally identifying information is used; all values
+are country-year aggregates. No vulnerable groups are individually
+identifiable. The main residual ethical concern is the one already
+flagged under Authority: GBD prevalence figures for low-resource
+countries can drive policy conversations that those countries did not
+themselves participate in producing.
+
+**Challenges in assessing CARE.** CARE was written with Indigenous
+peoples in mind; applying it to country-level health and economics
+indicators is an act of translation. We are reasoning about whether the
+*country* whose row appears in the panel had authority over its own
+representation, which is a different question from whether a community
+had authority over data about itself. A confident CARE audit would
+require contacting national statistical offices and IHME data partners,
+which is beyond the scope of this exploratory project.
+
+## Wrangling
+
+The pipeline that produces `data/merged_with_controls.csv` is split
+across four scripts under `R/` (acquire, clean and join, analyse and
+visualise, controls and education). Briefly:
+
+1. Pull the four headline indicators and three controls from WB WDI
+   through the `{WDI}` package, save raw RDS files.
+2. Pull OECD `HH_DASH` through the `{OECD}` package; pull IHME GBD as
+   two CSVs (the GBD Results Tool caps rows per request).
+3. Harmonise country codes to ISO-3166 alpha-3 with `{countrycode}` so
+   the joins are unambiguous; drop rows where the code cannot be
+   resolved (mostly aggregates like "Sub-Saharan Africa").
+4. Aggregate OECD's quarterly housing series to annual means.
+5. Inner-join youth unemployment to internet, fertility, mental health,
+   and housing on `(iso3c, year)`. Then left-join the three controls.
+6. Add `continent` and `income_group` from `{countrycode}` for plotting.
+
+The wrangling is documented in commented code in `R/02_clean_join.R`
+and `R/04_causal_education.R`. We treat missing observations through
+the `na.rm = TRUE` and `drop_na()` patterns rather than imputation,
+because we are doing description, not prediction.
+
+# Descriptive statistics
+
+```{r tbl-summary}
+#| tbl-cap: "Descriptive statistics for the five headline variables and three controls. Computed from the country-year panel after merging."
+
+panel |>
+  select(internet, youth_unemp, fertility, mental_health, house_price,
+         gdp_pc, tertiary_ed, urban_pct) |>
+  summarise(across(everything(),
+                   list(
+                     n     = ~sum(!is.na(.x)),
+                     mean  = ~mean(.x, na.rm = TRUE),
+                     sd    = ~sd(.x, na.rm = TRUE),
+                     min   = ~min(.x, na.rm = TRUE),
+                     med   = ~median(.x, na.rm = TRUE),
+                     max   = ~max(.x, na.rm = TRUE)
+                   ),
+                   .names = "{.col}__{.fn}")) |>
+  pivot_longer(everything(),
+               names_to = c("variable", "stat"),
+               names_sep = "__",
+               values_to = "value") |>
+  pivot_wider(names_from = stat, values_from = value) |>
+  mutate(across(c(mean, sd, min, med, max), ~round(.x, 2))) |>
+  rename(N = n, Mean = mean, SD = sd, Min = min,
+         Median = med, Max = max, Variable = variable) |>
+  kbl(booktabs = TRUE, align = c("l", rep("r", 6))) |>
+  kable_styling(latex_options = c("striped", "hold_position"),
+                full_width = FALSE)
+```
+
+@tbl-summary shows that the country-year panel covers a wide range on
+every dimension. Internet penetration spans roughly zero to near-100%;
+fertility runs from low-1s in East Asia and parts of Europe to mid-6s
+in parts of sub-Saharan Africa; mental disorder prevalence ranges from
+roughly 6% to 18%. The housing index is missing for non-OECD countries,
+which is why its `N` is much smaller than that of the WDI series.
+
+# Visualisations
+
+## The headline pattern
+
+```{r fig-hero}
+#| fig-cap: "Internet penetration plotted against four generational outcomes. Solid lines are local (loess) fits with shaded uncertainty; dashed lines are simple OLS fits. Each point is one country-year, 2000-2023."
+#| fig-alt: "A two-by-two grid of scatter plots. Each panel has internet users (% of population) on the x-axis and one outcome on the y-axis: youth unemployment, fertility rate, mental disorder prevalence, and real house price index. Youth unemployment shows a slight upward trend; fertility falls steeply as internet rises; mental disorder prevalence rises modestly; house price rises moderately."
+#| fig-height: 6.5
+
+make_panel <- function(outcome, y_lab, color_hex, ylim_pair = NULL) {
+  p <- panel |>
+    filter(!is.na(internet), !is.na(.data[[outcome]])) |>
+    ggplot(aes(x = internet, y = .data[[outcome]])) +
+    geom_point(alpha = 0.15, size = 0.7, color = color_hex) +
+    geom_smooth(method = "loess", se = TRUE, span = 0.7,
+                color = color_hex, fill = color_hex, alpha = 0.25,
+                linewidth = 1.0) +
+    geom_smooth(method = "lm", se = FALSE,
+                color = "black", linetype = "dashed",
+                linewidth = 0.6) +
+    labs(title = y_lab, x = NULL, y = NULL) +
+    theme_minimal(base_size = 10) +
+    theme(plot.title = element_text(size = 9, face = "bold"))
+  if (!is.null(ylim_pair)) p <- p + coord_cartesian(ylim = ylim_pair)
+  p
+}
+
+cols <- c("#e41a1c", "#377eb8", "#4daf4a", "#984ea3")
+
+(make_panel("youth_unemp",   "Youth Unemployment (%)",
+            cols[1], ylim_pair = c(0, 50)) +
+ make_panel("fertility",     "Fertility Rate (children per woman)",
+            cols[2])) /
+(make_panel("mental_health", "Mental Disorder Prevalence (%, age-std)",
+            cols[3]) +
+ make_panel("house_price",   "Real House Price Index (2015 = 100)",
+            cols[4], ylim_pair = c(40, 200))) +
+  plot_annotation(
+    title = "As countries go online: four generational pressures",
+    theme = theme(plot.title = element_text(size = 12, face = "bold")))
+```
+
+@fig-hero presents the headline EDA result of this project. The four
+panels share the same x-axis: internet penetration. Reading the panels
+clockwise from top-left: **youth unemployment** rises modestly with
+internet penetration, with the loess fit climbing from roughly 12% to
+roughly 18% across the range; **fertility** drops steeply, from above 5
+children per woman at low internet penetration to near 1.5 at high
+penetration; **house price** trends upward but with substantial spread,
+suggesting the housing-affordability story is real on average but very
+country-specific; **mental disorder prevalence** rises gently. The
+loess curves diverge from the dashed OLS lines mainly at the extremes
+(very low or very high internet penetration), which suggests the
+linear summary masks some non-linearity.
+
+These patterns are surface-level. The next subsections push on whether
+they survive controls.
+
+## Pairwise correlations
+
+```{r fig-corr}
+#| fig-cap: "Pairwise Pearson correlations between internet penetration and the four outcomes (complete cases only)."
+#| fig-alt: "A correlation heatmap with five rows and five columns: Internet, Youth Unemployment, Fertility, Anxiety, House Price. Cells use circle markers sized and colored by correlation strength. Internet correlates negatively with fertility (strong, dark), positively with anxiety and house price (moderate), and weakly positively with youth unemployment."
+#| fig-height: 4.5
+
+cor_data <- panel |>
+  select(internet, youth_unemp, fertility, mental_health, house_price) |>
+  drop_na()
+
+cor_mat <- cor(cor_data, use = "complete.obs")
+colnames(cor_mat) <- rownames(cor_mat) <-
+  c("Internet", "Youth\nUnemp.", "Fertility", "Anxiety", "House\nPrice")
+
+ggcorrplot(
+  cor_mat,
+  method   = "circle",
+  type     = "lower",
+  lab      = TRUE,
+  lab_size = 3.5,
+  colors   = c("#E46726", "white", "#6D9EC1"),
+  ggtheme  = theme_minimal(base_size = 11)
+)
+```
+
+@fig-corr summarises the same patterns as @fig-hero but stripped of
+the country-year scatter. The strongest pairwise correlation is the
+negative one between internet penetration and fertility. Mental health
+prevalence and house price both correlate positively with internet at
+moderate strength. Youth unemployment is weakest -- the headline scatter
+is almost flat in absolute slope.
+
+## By income group
+
+```{r fig-income}
+#| fig-cap: "Each outcome plotted against internet penetration, faceted by World Bank income group. Within-row scales are free."
+#| fig-alt: "A four-by-four grid of scatter plots. Rows are the four outcomes (youth unemployment, fertility, mental disorder prevalence, house price); columns are World Bank income groups (Low, Lower middle, Upper middle, High). Trend lines vary across panels: the fertility decline is steepest in low and lower-middle countries; house price patterns are dominated by high-income countries because OECD coverage skews high-income."
+#| fig-height: 7
+
+outcome_labels <- c(
+  youth_unemp   = "Youth Unemployment (%)",
+  fertility     = "Fertility Rate",
+  mental_health = "Mental Disorders (%)",
+  house_price   = "House Price Index"
+)
+
+panel |>
+  filter(!is.na(income_group)) |>
+  pivot_longer(cols      = c(youth_unemp, fertility,
+                             mental_health, house_price),
+               names_to  = "outcome",
+               values_to = "value") |>
+  mutate(outcome = recode(outcome, !!!outcome_labels)) |>
+  filter(!is.na(internet), !is.na(value)) |>
+  ggplot(aes(x = internet, y = value)) +
+  geom_point(alpha = 0.25, size = 0.8, color = "steelblue") +
+  geom_smooth(method = "lm", se = TRUE,
+              color = "firebrick", linewidth = 0.7) +
+  facet_grid(outcome ~ income_group, scales = "free_y") +
+  labs(x = "Internet Users (% of population)", y = NULL) +
+  theme_bw(base_size = 10) +
+  theme(strip.text = element_text(size = 7))
+```
+
+@fig-income breaks the headline scatters by World Bank income group.
+The fertility decline is steepest in **low** and **lower-middle** income
+countries, where the range of internet penetration is also widest. In
+**high-income** countries, fertility has already converged near 1.5-2.0
+across the entire range, so the slope flattens. The house price panels
+are nearly empty for low-income countries because OECD coverage is
+skewed toward high-income members; readers should treat the
+house-price column as essentially a high-income story.
+
+## Naive coefficients with confidence intervals
+
+```{r fig-coef}
+#| fig-cap: "OLS coefficients on `internet` (per 1 percentage-point increase) for each outcome, with 95% confidence intervals. Bivariate regression: outcome ~ internet."
+#| fig-alt: "A horizontal dot-and-error-bar plot. The y-axis lists the four outcomes; the x-axis is the OLS coefficient on internet. House price has the largest positive coefficient with a tight interval, followed by youth unemployment (small positive). Fertility has a negative coefficient. Mental health is near zero. All four intervals exclude zero."
+#| fig-height: 3.5
+
+run_lm <- function(outcome) {
+  df <- panel |> filter(!is.na(internet), !is.na(.data[[outcome]]))
+  lm(reformulate("internet", outcome), data = df)
+}
+
+models <- map(names(outcome_labels), run_lm) |>
+  setNames(names(outcome_labels))
+
+coef_df <- imap_dfr(models, \(m, nm) {
+  ci <- confint(m)["internet", ]
+  tibble(outcome  = outcome_labels[[nm]],
+         estimate = coef(m)["internet"],
+         lower_95 = ci[1],
+         upper_95 = ci[2])
+})
+
+coef_df |>
+  mutate(outcome = fct_reorder(outcome, estimate)) |>
+  ggplot(aes(x = estimate, y = outcome)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = lower_95, xmax = upper_95),
+                 height = 0.2, color = "#d62728") +
+  geom_point(size = 3, color = "#d62728") +
+  labs(x = "Coefficient on internet (per 1 pp increase)",
+       y = NULL) +
+  theme_minimal(base_size = 11)
+```
+
+@fig-coef compresses the four bivariate slopes into a single chart.
+Reading from the most positive to the most negative: house price
+(roughly +0.22 index points per percentage point of internet), youth
+unemployment (small positive), mental disorder prevalence (essentially
+zero in absolute terms but statistically distinguishable from zero
+given panel size), and fertility (roughly -0.03 children per woman per
+percentage point of internet). All four 95% CIs exclude zero. This is
+the "internet is doing everything" reading.
+
+## What survives controls and fixed effects
+
+```{r fig-nested}
+#| fig-cap: "How the coefficient on internet changes as the model is enlarged. Model 1 is bivariate; Model 2 adds log(GDP per capita), tertiary enrollment, and urbanisation; Model 3 adds country and year fixed effects on top of the controls."
+#| fig-alt: "A four-panel facet of horizontal coefficient plots. For each of the four outcomes, three rows show Model 1 (bivariate), Model 2 (plus controls), Model 3 (plus country and year fixed effects). For youth unemployment, mental health, and house price, the coefficient shrinks toward zero or flips sign in Model 3. For fertility, the negative coefficient survives all three specifications."
+#| fig-height: 4.5
+
+run_nested <- function(outcome) {
+  df <- panel |>
+    filter(!is.na(internet),
+           !is.na(.data[[outcome]]),
+           !is.na(gdp_pc), !is.na(tertiary_ed),
+           !is.na(urban_pct)) |>
+    mutate(country_f = factor(iso3c),
+           year_f    = factor(year),
+           log_gdp   = log(gdp_pc))
+  m1 <- lm(reformulate("internet", outcome), data = df)
+  m2 <- lm(reformulate(c("internet", "log_gdp",
+                         "tertiary_ed", "urban_pct"),
+                       outcome), data = df)
+  m3 <- lm(reformulate(c("internet", "log_gdp", "tertiary_ed",
+                         "urban_pct", "country_f", "year_f"),
+                       outcome), data = df)
+  bind_rows(
+    tibble(model = "1: bivariate",
+           outcome = outcome,
+           est = coef(m1)["internet"],
+           se  = sqrt(diag(vcov(m1)))["internet"]),
+    tibble(model = "2: + controls",
+           outcome = outcome,
+           est = coef(m2)["internet"],
+           se  = sqrt(diag(vcov(m2)))["internet"]),
+    tibble(model = "3: + country & year FE",
+           outcome = outcome,
+           est = coef(m3)["internet"],
+           se  = sqrt(diag(vcov(m3)))["internet"])
+  )
+}
+
+nested <- map_dfr(names(outcome_labels), run_nested) |>
+  mutate(lower_95 = est - 1.96 * se,
+         upper_95 = est + 1.96 * se,
+         sig      = (lower_95 > 0) | (upper_95 < 0),
+         outcome  = recode(outcome, !!!outcome_labels))
+
+ggplot(nested, aes(x = est, y = fct_rev(model), color = sig)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = lower_95, xmax = upper_95),
+                 height = 0.2) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = c("TRUE" = "#d62728",
+                                "FALSE" = "#7f7f7f"),
+                     labels = c("TRUE" = "p < 0.05",
+                                "FALSE" = "n.s."),
+                     name = NULL) +
+  facet_wrap(~ outcome, scales = "free_x") +
+  labs(x = "Coefficient on internet (per 1 pp)",
+       y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+```
+
+@fig-nested is the most informative figure in this report. For three of
+the four outcomes -- youth unemployment, mental disorder prevalence,
+and house price -- the coefficient on internet shrinks substantially or
+flips sign once we condition on country and year fixed effects. Country
+fixed effects absorb everything that is constant about a country
+(geography, institutions, baseline wealth), and year fixed effects
+absorb global shocks (the 2008 financial crisis, COVID-19). What that
+leaves is *within-country, within-year* variation in internet
+penetration. For three of the four headline patterns, that variation
+does not move the outcome.
+
+The exception is **fertility**. The negative coefficient survives all
+three specifications. We cannot read this as a causal effect from this
+analysis, but we can say the pattern is robust to the simplest
+identification strategy available with this panel.
+
+## The education channel
+
+```{r fig-ed-mental}
+#| fig-cap: "Mental disorder prevalence vs. internet, faceted by tertiary education tier. If education were the real driver, the slope should flatten in the high-education panel."
+#| fig-alt: "Three side-by-side scatter plots of mental disorder prevalence on internet penetration, faceted by tertiary education tier (Low under 30%, Mid 30 to 60%, High 60% plus). Each panel shows a positive slope, with similar magnitudes across panels."
+#| fig-height: 3.5
+
+ed_data <- panel |>
+  filter(!is.na(internet), !is.na(tertiary_ed),
+         !is.na(mental_health), !is.na(fertility)) |>
+  mutate(ed_tier = case_when(
+    tertiary_ed < 30 ~ "Low (<30%)",
+    tertiary_ed < 60 ~ "Mid (30-60%)",
+    TRUE             ~ "High (60%+)"),
+    ed_tier = factor(ed_tier,
+                     levels = c("Low (<30%)",
+                                "Mid (30-60%)",
+                                "High (60%+)")))
+
+ggplot(ed_data, aes(x = internet, y = mental_health)) +
+  geom_point(alpha = 0.3, size = 0.9, color = "#4daf4a") +
+  geom_smooth(method = "lm", color = "#1b5e20",
+              se = TRUE, linewidth = 0.9) +
+  facet_wrap(~ ed_tier, nrow = 1) +
+  labs(x = "Internet Users (% of population)",
+       y = "Mental Disorder Prevalence (%, age-std)") +
+  theme_minimal(base_size = 10) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+```{r fig-ed-fert}
+#| fig-cap: "Fertility vs. internet, faceted by tertiary education tier. The decline is steepest in the low-education tier."
+#| fig-alt: "Three side-by-side scatter plots of fertility rate on internet penetration, faceted by tertiary education tier. The low-education panel shows the steepest negative slope; the high-education panel shows a near-flat negative slope."
+#| fig-height: 3.5
+
+ggplot(ed_data, aes(x = internet, y = fertility)) +
+  geom_point(alpha = 0.3, size = 0.9, color = "#377eb8") +
+  geom_smooth(method = "lm", color = "#0d47a1",
+              se = TRUE, linewidth = 0.9) +
+  facet_wrap(~ ed_tier, nrow = 1) +
+  labs(x = "Internet Users (% of population)",
+       y = "Fertility Rate (children per woman)") +
+  theme_minimal(base_size = 10) +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+@fig-ed-mental and @fig-ed-fert split the sample by tertiary education
+tier and re-plot the headline slope. For mental health the slope is
+similar across tiers, which is consistent with internet penetration
+having an effect that is not absorbed by education. For fertility, the
+decline is steepest in the low-education tier and gentlest in the
+high-education tier. Tertiary enrollment and internet penetration
+co-evolve; this faceting cannot separate them, but it suggests the
+naive negative slope is partly an "education up, fertility down"
+story rather than a pure "internet down, fertility down" story.
+
+# Discussion and hypotheses for future work
+
+The exploratory headline is straightforward: at the country-year level,
+internet penetration tracks all four outcomes (more youth unemployment,
+lower fertility, higher mental disorder prevalence, higher house
+prices), but only one of those four patterns -- the negative
+relationship with fertility -- survives a basic two-way fixed-effects
+specification. The other three are largely soaked up by what is
+constant about each country and what is global about each year.
+
+We propose three hypotheses for future confirmatory work, each of which
+would need a different identification strategy and is beyond the scope
+of an EDA project:
+
+1. **Fertility.** The within-country, within-year association between
+   internet penetration and fertility is non-zero and negative. A
+   confirmatory test would need an instrument for internet adoption
+   (e.g. fibre-rollout policy variation) and a measurement of fertility
+   that does not lag the internet measure mechanically.
+2. **Mental health.** The bivariate positive correlation does not
+   survive fixed effects, but the slopes within tertiary-education tier
+   are roughly parallel. This is consistent with a model where internet
+   use raises measured prevalence directly *and* through measurement
+   change (clinics in higher-internet countries diagnose more), and
+   distinguishing those would need micro-level data.
+3. **Housing.** The naive positive association is essentially a
+   high-income, OECD story. A confirmatory analysis would need to
+   compare cities or sub-national units, not countries.
+
+# Author contributions
+
+This is a solo project by **Harsh Rathi**, who took on all CRediT roles:
+Conceptualization, Data curation, Formal analysis, Investigation,
+Methodology, Software, Visualization, Writing -- original draft, and
+Writing -- review and editing [@credit_taxonomy].
+
+# References {-}
+
+::: {#refs}
+:::
+
+\newpage
+
+# Code appendix {-}
+
+All code chunks used to produce this report are reproduced below; no
+code appears in the body. The first chunk is `setup`; subsequent chunks
+appear in the order they are executed in the report.
+
+```{r code-appendix}
+#| ref.label: !expr knitr::all_labels()
+#| echo: true
+#| eval: false
+#| code-fold: false
+```
