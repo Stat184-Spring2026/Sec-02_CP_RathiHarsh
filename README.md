@@ -106,4 +106,4 @@ In `plots/`:
 
 ## Author
 
-Harsh Rathi -- harsh@psu.edu
+Harsh Rathi -- hrathi@psu.edu
